@@ -14,7 +14,11 @@ POC to verify AWS Bedrock Claude prompt caching behavior via the Converse API an
 | **6** | Tools change — cascading cache invalidation | Converse |
 | **7A** | Tools change with explicit `cache_control` | Messages |
 | **7B** | Tools change without markers (Simplified Cache) | Messages |
-| **8** | Simplified cache: single checkpoint + 20-block boundary | Messages |
+| **8** | Single checkpoint beyond 20 content blocks | Messages |
+| **9A** | Simplified mode: modification detection | Messages |
+| **9B** | Manual mode: checkpoint independence | Messages |
+| **10** | Sliding window cache pattern | Messages |
+| **Cross-process** | Global cache verification | Messages |
 
 ## Quick Start
 
@@ -25,7 +29,10 @@ pip install boto3
 python bedrock_cache_poc.py --model us.anthropic.claude-sonnet-4-5-20250929-v1:0 --region us-east-1
 
 # Run a specific test
-python bedrock_cache_poc.py --test 6 --model us.anthropic.claude-sonnet-4-5-20250929-v1:0 --region us-east-1
+python bedrock_cache_poc.py --test 9 --model us.anthropic.claude-sonnet-4-5-20250929-v1:0 --region us-east-1
+
+# Cross-process cache verification (separate script)
+python test_cross_process.py --model us.anthropic.claude-sonnet-4-5-20250929-v1:0 --region us-east-1
 ```
 
 > **Note:** Requires AWS credentials with Bedrock access. Use an inference profile ID (e.g. `us.anthropic.claude-sonnet-4-5-20250929-v1:0`) rather than a bare model ID.
@@ -34,7 +41,7 @@ python bedrock_cache_poc.py --test 6 --model us.anthropic.claude-sonnet-4-5-2025
 
 ### Test 6: Tools Change — Converse API with `cachePoint`
 
-Setup: tools and system both have `cachePoint` markers. A third tool is added in calls 6c/6e to change the tools definition.
+Setup: tools and system both have `cachePoint` markers (2 checkpoints). A third tool is added in calls 6c/6e.
 
 | Call | Action | Cache Read | Cache Write | Result |
 |------|--------|-----------|-------------|--------|
@@ -45,83 +52,131 @@ Setup: tools and system both have `cachePoint` markers. A third tool is added in
 | 6e | Changed tools again | 11,365 | 0 | ✅ HIT |
 
 **Observations:**
-- 6c shows **partial cache hit** (read=4,712 ≈ system prompt size). When tools change, the system `cachePoint` still matches because its content is identical. Only the tools portion is re-cached.
-- Each `cachePoint` is evaluated independently — changing content before one checkpoint does not invalidate checkpoints whose content is unchanged.
-- Multiple cache versions coexist within TTL. Switching between tool versions (6d, 6e) hits the respective cached version.
+- 6c shows **partial cache hit** (read=4,712 ≈ system prompt size). With 2 checkpoints, changing tools does not invalidate the system checkpoint.
+- Each `cachePoint` is evaluated independently.
+- Multiple cache versions coexist within TTL.
 
-### Test 7A: Tools Change — Messages API with explicit `cache_control`
-
-Same tool-switching pattern as Test 6, using Messages API (`invoke_model`) with explicit `cache_control` markers.
+### Test 7B: Messages API without markers
 
 | Call | Action | Cache Read | Cache Write | Result |
 |------|--------|-----------|-------------|--------|
-| 7Aa | Original tools | 9,074 | 0 | ✅ HIT |
-| 7Ab | Same (unchanged) | 9,074 | 0 | ✅ HIT |
-| 7Ac | **Changed tools** | 11,365 | 0 | ✅ HIT |
-| 7Ad | Back to original | 9,074 | 0 | ✅ HIT |
+| 7Ba–7Bd | Various | 0 | 0 | ⚪ NONE |
 
-**Observations:**
-- 7Aa immediately hits cache — **Converse API and Messages API share the same cache pool**. Test 6's cached entries are reused.
-- 7Ac also hits because Test 6e already warmed the changed-tools cache.
+**No `cache_control` markers = zero cache activity.** Bedrock requires explicit markers.
 
-### Test 7B: Tools Change — Messages API without markers (Simplified Cache)
+### Test 8: Single Checkpoint Beyond 20 Content Blocks
 
-Same pattern, but with **no `cache_control` markers** — testing whether Bedrock's Simplified Cache activates automatically.
-
-| Call | Action | Cache Read | Cache Write | Input Tokens | Result |
-|------|--------|-----------|-------------|--------------|--------|
-| 7Ba | Original tools | 0 | 0 | 9,410 | ⚪ NONE |
-| 7Bb | Same (unchanged) | 0 | 0 | 9,410 | ⚪ NONE |
-| 7Bc | Changed tools | 0 | 0 | 11,701 | ⚪ NONE |
-| 7Bd | Back to original | 0 | 0 | 9,410 | ⚪ NONE |
-
-**Observations:**
-- Zero cache activity across all calls. **Simplified Cache does not activate on Bedrock's Messages API (invoke_model)**, even for Sonnet 4.5.
-- Without explicit `cache_control` markers, no caching occurs — all input tokens are billed at full price.
-
-### Test 8: Simplified Cache — Single Checkpoint Beyond 20 Content Blocks
-
-Per AWS docs, simplified cache management uses ONE checkpoint and looks back ~20 content blocks. This test uses multi-block assistant messages (3 text blocks each) to quickly exceed 20 blocks, with only ONE `cache_control` on the last assistant block.
+One `cache_control` on last assistant block. Multi-block assistant messages (3 text blocks each).
 
 | Call | Turns | Content Blocks | Cache Read | Cache Write | Result |
 |------|-------|---------------|-----------|-------------|--------|
-| 8-4t-first | 4 | 17 | 0 | 4,738 | 📝 WRITE |
-| 8-4t-same | 4 | 17 | 4,738 | 0 | ✅ HIT |
-| 8-5t-first | 5 | 21 | 4,738 | 107 | ✅ HIT + incremental |
-| 8-5t-same | 5 | 21 | 4,845 | 0 | ✅ HIT |
-| 8-7t-first | 7 | 29 | 4,845 | 177 | ✅ HIT + incremental |
-| 8-10t-first | 10 | 41 | 5,022 | 266 | ✅ HIT + incremental |
-| 8-10t-same | 10 | 41 | 5,288 | 0 | ✅ HIT |
+| 4t-first | 4 | 17 | 0 | 4,738 | 📝 WRITE |
+| 4t-same | 4 | 17 | 4,738 | 0 | ✅ HIT |
+| 5t-first | 5 | 21 | 4,738 | 107 | ✅ incremental |
+| 7t-first | 7 | 29 | 4,845 | 177 | ✅ incremental |
+| 10t-first | 10 | 41 | 5,022 | 266 | ✅ incremental |
+| 10t-same | 10 | 41 | 5,288 | 0 | ✅ HIT |
 
-**Observations:**
-- With a single `cache_control` on the last assistant block, caching works correctly even at **41 content blocks** — well beyond the documented ~20 block lookback window.
-- Cache grows incrementally as conversation extends: prefix hits from previous cache, only new turns are written (107, 177, 266 tokens).
-- The "~20 block" lookback likely refers to the search depth for finding the best matching prefix, not a hard limit on cache storage. Once a prefix match is established, subsequent growth is purely incremental.
+Caching works correctly even at **41 content blocks**. Cache grows incrementally as conversation extends.
+
+### Test 9: Simplified vs Manual Mode — Clean Verification
+
+UUID-stamped content to guarantee no cache residue from prior runs.
+
+**9A: Simplified Mode (1 checkpoint on last assistant only)**
+
+| Call | Action | Cache Read | Cache Write | Result |
+|------|--------|-----------|-------------|--------|
+| 9Aa | Establish cache (31 blocks) | 0 | 5,346 | 📝 WRITE |
+| 9Ab | Same | 5,346 | 0 | ✅ HIT |
+| 9Ac | **Modify block #1** (early) | 0 | 5,330 | ❌ MISS |
+| 9Ad | **Modify block #25** (late) | 0 | 5,330 | ❌ MISS |
+| 9Ae | **Modified system** | 0 | 5,350 | ❌ MISS |
+| 9Af | **Added tools** | 0 | 10,379 | ❌ MISS |
+| 9Ag | Extended to 33 blocks | 5,346 | 65 | ✅ incremental |
+| 9Ah | Back to original | 5,346 | 0 | ✅ HIT |
+
+With 1 checkpoint: **any modification anywhere = full cache miss.** Only appending new content at the end produces incremental cache growth.
+
+**9B: Manual Mode (2 checkpoints: system + last assistant)**
+
+| Call | Action | Cache Read | Cache Write | Result |
+|------|--------|-----------|-------------|--------|
+| 9Ba | Establish cache (31 blocks) | 0 | 5,284 | 📝 WRITE |
+| 9Bb | Same | 5,284 | 0 | ✅ HIT |
+| 9Bc | **Modify block #1** (early) | **4,369** | 899 | ✅ **Partial HIT** |
+| 9Bd | **Modify block #25** (late) | **4,369** | 899 | ✅ **Partial HIT** |
+| 9Be | **Modified system** | 0 | 5,288 | ❌ MISS |
+| 9Bf | Back to original | 5,284 | 0 | ✅ HIT |
+
+With 2 checkpoints: **system checkpoint survives message changes** (read=4,369 ≈ system prompt size). Only changing the system prompt itself causes a full miss.
+
+### Test 10: Sliding Window Cache Pattern
+
+Maintain a conversation window of ~20 blocks. As new turns arrive, drop the oldest. 2 checkpoints (system + last assistant).
+
+| Call | Window | Blocks | Cache Read | Cache Write | Result |
+|------|--------|--------|-----------|-------------|--------|
+| 10a | turns 1-10 | 21 | 0 | 4,958 | 📝 WRITE |
+| 10b | same | 21 | 4,958 | 0 | ✅ HIT |
+| 10c | **turns 3-10** (dropped 1-2) | 17 | **4,368** | 472 | ✅ system HIT |
+| 10d | same | 17 | 4,840 | 0 | ✅ HIT |
+| 10e | **turns 3-12** (slide +2) | 21 | **4,840** | 118 | ✅ incremental |
+| 10f | same | 21 | 4,958 | 0 | ✅ HIT |
+| 10g | **turns 5-14** (slide +2) | 21 | **4,368** | 590 | ✅ system HIT |
+| 10h | same | 21 | 4,958 | 0 | ✅ HIT |
+
+**Sliding window is viable.** When dropping early turns:
+- System prompt cache (~4,368 tokens) **always hits** — the biggest cost saving
+- Only the changed messages portion needs re-caching
+- Appending new turns at the end is purely incremental
+
+### Cross-Process Cache Verification
+
+Separate script (`test_cross_process.py`) using independent subprocesses.
+
+| Process | Content | PID | Cache Read | Cache Write | Result |
+|---------|---------|-----|-----------|-------------|--------|
+| A | seed=fixed | 3022935 | 0 | 4,620 | 📝 WRITE |
+| A (verify) | same | 3022935 | 4,620 | 0 | ✅ HIT |
+| **B** (child) | **same seed** | **3023055** | **4,620** | **0** | **✅ HIT** |
+| **C** (child) | **different seed** | **3023098** | **0** | **4,620** | **📝 MISS** |
+
+**Bedrock prompt cache is a global content-addressable KV store:**
+- Same content + different process → HIT (not session/process-isolated)
+- Different content + different process → MISS (content-hash indexed)
+- Shared across all requests within the same AWS account + region + model
 
 ## Key Findings
 
-1. **Each `cachePoint` is evaluated independently** — Changing tools does not fully invalidate the system cache. If the system prompt content is identical, its `cachePoint` still hits. This means the cache is more granular than pure prefix-matching: each checkpoint tracks its own content hash.
+1. **Simplified mode (1 checkpoint) vs Manual mode (2+ checkpoints) behave differently.** Simplified mode treats the entire prefix as one unit — any change = full miss. Manual mode evaluates each checkpoint independently — system cache survives message changes.
 
-2. **Multiple cache versions coexist** — Within TTL, different tool configurations are cached independently. Switching back to a previously cached configuration still hits.
+2. **Manual mode is strictly better for long conversations.** With 2 checkpoints (system + last assistant), the system prompt cache is protected even when conversation content changes or slides. This is critical for agentic and multi-turn use cases.
 
-3. **Converse API and Messages API share the same cache pool** — A cache entry written via Converse API can be read by Messages API and vice versa, as long as the content and checkpoint positions match.
+3. **Sliding window pattern works.** Drop old turns, keep recent ones, use 2 checkpoints. System cache (~4K+ tokens) always hits. Only the messages portion needs re-caching on each window slide.
 
-4. **Simplified Cache does not work on Bedrock** — Anthropic's Simplified Cache (auto-caching without explicit markers) is not available on Bedrock's `invoke_model` endpoint. You must use explicit `cache_control` (Messages API) or `cachePoint` (Converse API) markers.
+4. **Cache is global and content-addressable.** Verified across independent processes. All requests in the same account/region/model share the cache. Multiple instances of a service with the same system prompt automatically benefit from shared caching.
 
-5. **No markers = no caching** — Without explicit markers, identical requests produce zero cache activity regardless of model version.
+5. **Converse API and Messages API share the same cache pool.** A cache entry written via one API can be read by the other.
 
-6. **`cachePoint` placement matters** — In the Converse API, `cachePoint` must be placed inside the `content` array as a content block:
-   ```json
-   {
-     "role": "assistant",
-     "content": [
-       {"text": "..."},
-       {"cachePoint": {"type": "default"}}
-     ]
-   }
-   ```
+6. **No markers = no caching on Bedrock.** Unlike Anthropic's direct API (which has Simplified Cache for Sonnet 4.5+), Bedrock requires explicit `cache_control` / `cachePoint` markers. Without them, zero cache activity occurs.
 
-7. **Single checkpoint works beyond 20 content blocks** — The documented "~20 block lookback" does not limit cache storage. With one `cache_control` on the last assistant block, caching works correctly at 17, 21, 29, and even 41 content blocks. Cache grows incrementally as conversation extends.
+7. **Appending content is always incremental.** Adding new turns at the end of a conversation always produces prefix hit + incremental write, regardless of total block count (tested up to 41 blocks).
+
+8. **Multiple cache versions coexist within TTL.** Switching between different tool configurations or conversation variants hits the respective cached version, as long as it's within TTL.
+
+## Best Practices
+
+Based on test results, the recommended caching strategy:
+
+```
+[tools + cachePoint] → [system + cachePoint] → [messages... last_assistant + cachePoint] → [new user]
+```
+
+- **Always use 2-3 explicit checkpoints** (not just 1) — protects stable content from changes in volatile content
+- **Place checkpoints at stability boundaries**: tools (rarely change) → system (rarely changes) → last assistant (changes every turn)
+- **For sliding windows**: keep system + tools cached, only slide the messages portion
+- **Keep tools and system prompts stable** — changes to tools/system invalidate everything downstream
 
 ## Converse API vs Messages API
 
