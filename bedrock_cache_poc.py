@@ -309,6 +309,85 @@ def test_5_cache_invalidation(client, model_id):
     return m1, m2, m3
 
 
+def test_6_tools_change_cascading_invalidation(client, model_id):
+    """Test 6: Verify that modifying tools invalidates system AND messages cache.
+    
+    Prompt caching is strict prefix-based: tools → system → messages.
+    If tools change, everything downstream (system + messages) must re-cache,
+    even if system and messages are identical.
+    """
+    log("\n\n" + "█" * 60)
+    log("TEST 6: Tools change → cascading cache invalidation")
+    log("█" * 60)
+    log("Expected: Changing tools invalidates system & messages cache")
+    log("This verifies the strict prefix-matching behavior:")
+    log("  tools (changed) → system (same) → messages (same) = ALL MISS")
+    
+    # Shared system prompt with checkpoint
+    system = [
+        {"text": SYSTEM_PROMPT},
+        {"cachePoint": {"type": "default"}}
+    ]
+    
+    # Original tools with checkpoint
+    tools_v1 = TOOL_DEFINITIONS + [{"cachePoint": {"type": "default"}}]
+    
+    # Modified tools: add a new tool (changes the tools prefix)
+    tools_v2 = TOOL_DEFINITIONS + [
+        {
+            "toolSpec": {
+                "name": "get_s3_storage_cost",
+                "description": "Calculate S3 storage costs for a given amount of data and storage class. " + generate_padding(600),
+                "inputSchema": {
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "storage_gb": {"type": "number", "description": "Storage amount in GB"},
+                            "storage_class": {"type": "string", "description": "S3 storage class (STANDARD, IA, GLACIER, etc.)"},
+                            "region": {"type": "string", "description": "AWS region"}
+                        },
+                        "required": ["storage_gb"]
+                    }
+                }
+            }
+        },
+        {"cachePoint": {"type": "default"}}
+    ]
+    
+    # Same messages for all calls
+    messages = [{"role": "user", "content": [{"text": "What is the cheapest EC2 option for a web server?"}]}]
+    
+    # Call 1: Original tools + system → expect WRITE for both
+    m1 = call_converse(client, model_id, system, tools_v1, messages,
+                       "6a: Original tools+system (expect WRITE)")
+    
+    time.sleep(2)
+    
+    # Call 2: Same everything → expect READ (verify cache is warm)
+    m2 = call_converse(client, model_id, system, tools_v1, messages,
+                       "6b: Same tools+system (expect READ — cache warm)")
+    
+    time.sleep(2)
+    
+    # Call 3: CHANGED tools, same system, same messages → expect WRITE (all cache miss)
+    m3 = call_converse(client, model_id, system, tools_v2, messages,
+                       "6c: Changed tools, same system+messages (expect WRITE — cascade invalidation)")
+    
+    time.sleep(2)
+    
+    # Call 4: Back to original tools → expect READ (original cache still in TTL)
+    m4 = call_converse(client, model_id, system, tools_v1, messages,
+                       "6d: Back to original tools (expect READ — original cache still valid)")
+    
+    time.sleep(2)
+    
+    # Call 5: Changed tools again → expect READ (v2 cache now warm too)
+    m5 = call_converse(client, model_id, system, tools_v2, messages,
+                       "6e: Changed tools again (expect READ — v2 cache now warm)")
+    
+    return m1, m2, m3, m4, m5
+
+
 # ═══════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════
@@ -319,8 +398,8 @@ def main():
                        help="Model ID (default: Claude Sonnet 4)")
     parser.add_argument("--region", default="us-east-1",
                        help="AWS region (default: us-east-1)")
-    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5],
-                       help="Run specific test only (1-5)")
+    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5, 6],
+                       help="Run specific test only (1-6)")
     args = parser.parse_args()
     
     log(f"Bedrock Prompt Caching POC")
@@ -338,9 +417,10 @@ def main():
         3: ("Message history cache", test_3_message_history_cache),
         4: ("No cache baseline", test_4_no_cache_control_baseline),
         5: ("Cache invalidation", test_5_cache_invalidation),
+        6: ("Tools change cascading invalidation", test_6_tools_change_cascading_invalidation),
     }
     
-    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5]
+    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6]
     
     for test_num in run_tests:
         name, func = tests[test_num]

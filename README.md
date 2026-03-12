@@ -11,6 +11,7 @@ POC to verify AWS Bedrock Claude prompt caching (`cachePoint`) behavior via the 
 | **3** | Multi-turn message history caching | Incremental cache growth across turns |
 | **4** | No `cachePoint` baseline | Zero cache activity (control group) |
 | **5** | Cache invalidation on prefix change | Modified → new WRITE, revert → READ original |
+| **6** | Tools change → cascading invalidation | Changed tools invalidates system & messages cache |
 
 ## Quick Start
 
@@ -66,6 +67,8 @@ python bedrock_cache_poc.py --model us.anthropic.claude-3-7-sonnet-20250219-v1:0
 4. **Multiple cache versions coexist** — Within TTL, different prefix versions are cached independently. Switching back to a previously cached prefix still hits.
 
 5. **No `cachePoint` = no caching** — The Converse API requires explicit `cachePoint` markers. Without them, identical requests produce zero cache activity.
+
+6. **Tools change = cascading invalidation** — Because caching is strict prefix-based (`tools → system → messages`), modifying tools invalidates the cache for system and messages too, even if they're identical. This is why stable tool definitions are critical for cache efficiency.
 
 ## Converse API vs Anthropic API
 
