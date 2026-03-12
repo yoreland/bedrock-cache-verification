@@ -12,6 +12,7 @@ POC to verify AWS Bedrock Claude prompt caching (`cachePoint`) behavior via the 
 | **4** | No `cachePoint` baseline | Zero cache activity (control group) |
 | **5** | Cache invalidation on prefix change | Modified → new WRITE, revert → READ original |
 | **6** | Tools change → cascading invalidation | Changed tools invalidates system & messages cache |
+| **7** | Messages API: tools change + Simplified Cache | 7A: explicit `cache_control` vs 7B: auto Simplified Cache |
 
 ## Quick Start
 
@@ -69,6 +70,8 @@ python bedrock_cache_poc.py --model us.anthropic.claude-3-7-sonnet-20250219-v1:0
 5. **No `cachePoint` = no caching** — The Converse API requires explicit `cachePoint` markers. Without them, identical requests produce zero cache activity.
 
 6. **Tools change = cascading invalidation** — Because caching is strict prefix-based (`tools → system → messages`), modifying tools invalidates the cache for system and messages too, even if they're identical. This is why stable tool definitions are critical for cache efficiency.
+
+7. **Converse API vs Messages API** — Test 7 provides a direct comparison. The Messages API on newer models (Sonnet 4.5+) supports Simplified Cache (auto-caching without explicit markers). Test 7B verifies whether Simplified Cache also exhibits cascading invalidation when tools change.
 
 ## Converse API vs Anthropic API
 

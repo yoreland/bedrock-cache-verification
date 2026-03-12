@@ -309,6 +309,105 @@ def test_5_cache_invalidation(client, model_id):
     return m1, m2, m3
 
 
+# ─── Messages API helpers ───
+
+# Map Converse API model IDs to Messages API model IDs
+MESSAGES_API_MODEL_MAP = {
+    "anthropic.claude-sonnet-4-20250514-v1:0": "anthropic.claude-sonnet-4-20250514-v1:0",
+    "us.anthropic.claude-sonnet-4-20250514-v1:0": "us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "anthropic.claude-sonnet-4-5-20250929-v1:0": "anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "us.anthropic.claude-sonnet-4-5-20250929-v1:0": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+}
+
+
+def converse_tool_to_messages_tool(tool_spec):
+    """Convert Converse API toolSpec to Messages API tool format."""
+    spec = tool_spec.get("toolSpec", {})
+    return {
+        "name": spec.get("name", ""),
+        "description": spec.get("description", ""),
+        "input_schema": spec.get("inputSchema", {}).get("json", {}),
+    }
+
+
+def call_messages_api(client, model_id, system, tools, messages, test_name,
+                       cache_controls=None):
+    """Call Bedrock Messages API (invoke_model) and return cache metrics.
+    
+    Args:
+        cache_controls: dict of where to place cache_control markers.
+            e.g. {"tools_last": True, "system_last": True, "last_assistant": True}
+            If None, no explicit markers (tests Simplified Cache).
+    """
+    log(f"\n{'='*60}")
+    log(f"TEST (Messages API): {test_name}")
+    log(f"{'='*60}")
+
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 200,
+        "messages": messages,
+    }
+
+    if system:
+        if isinstance(system, str):
+            system_blocks = [{"type": "text", "text": system}]
+        elif isinstance(system, list) and all(isinstance(s, str) for s in system):
+            system_blocks = [{"type": "text", "text": s} for s in system]
+        else:
+            system_blocks = system  # already in block format
+        
+        if cache_controls and cache_controls.get("system_last") and system_blocks:
+            system_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        
+        body["system"] = system_blocks
+
+    if tools:
+        msg_tools = [converse_tool_to_messages_tool(t) for t in tools if "toolSpec" in t]
+        
+        if cache_controls and cache_controls.get("tools_last") and msg_tools:
+            msg_tools[-1]["cache_control"] = {"type": "ephemeral"}
+        
+        body["tools"] = msg_tools
+
+    # Add cache_control to last assistant message if requested
+    if cache_controls and cache_controls.get("last_assistant") and messages:
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", [])
+                if content:
+                    content[-1]["cache_control"] = {"type": "ephemeral"}
+                break
+
+    try:
+        response = client.invoke_model(
+            modelId=model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body),
+        )
+        result = json.loads(response["body"].read())
+        usage = result.get("usage", {})
+
+        metrics = {
+            "inputTokens": usage.get("input_tokens", 0),
+            "outputTokens": usage.get("output_tokens", 0),
+            "cacheWriteInputTokens": usage.get("cache_creation_input_tokens", 0),
+            "cacheReadInputTokens": usage.get("cache_read_input_tokens", 0),
+        }
+        print_metrics(test_name, metrics)
+
+        output = result.get("content", [])
+        if output:
+            text = output[0].get("text", "")[:150]
+            log(f"  Response: {text}...")
+
+        return metrics
+    except Exception as e:
+        log(f"  ❌ ERROR: {e}", "ERROR")
+        return None
+
+
 def test_6_tools_change_cascading_invalidation(client, model_id):
     """Test 6: Verify that modifying tools invalidates system AND messages cache.
     
@@ -388,6 +487,119 @@ def test_6_tools_change_cascading_invalidation(client, model_id):
     return m1, m2, m3, m4, m5
 
 
+# ─── Extra tool for Messages API (same content, Messages API format) ───
+
+EXTRA_TOOL_MESSAGES = {
+    "name": "get_s3_storage_cost",
+    "description": "Calculate S3 storage costs for a given amount of data and storage class. " + generate_padding(600),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "storage_gb": {"type": "number", "description": "Storage amount in GB"},
+            "storage_class": {"type": "string", "description": "S3 storage class (STANDARD, IA, GLACIER, etc.)"},
+            "region": {"type": "string", "description": "AWS region"}
+        },
+        "required": ["storage_gb"]
+    },
+}
+
+
+def test_7_messages_api_tools_change(client, model_id):
+    """Test 7: Messages API — tools change cascading invalidation.
+    
+    Compares two sub-tests:
+      7A: With explicit cache_control markers (like Test 6 but Messages API)
+      7B: WITHOUT markers (Simplified Cache) — does auto-cache also cascade-miss?
+    """
+    log("\n\n" + "█" * 60)
+    log("TEST 7: Messages API — tools change + Simplified Cache comparison")
+    log("█" * 60)
+    log("7A: Explicit cache_control — same logic as Test 6")
+    log("7B: No cache_control — tests Simplified Cache auto-caching behavior")
+
+    system_text = SYSTEM_PROMPT
+
+    # Convert Converse API tools to Messages API format
+    tools_v1_msg = [converse_tool_to_messages_tool(t) for t in TOOL_DEFINITIONS]
+    tools_v2_msg = tools_v1_msg + [EXTRA_TOOL_MESSAGES]
+
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": "What is the cheapest EC2 option for a web server?"}
+    ]}]
+
+    # ── 7A: Explicit cache_control ──
+    log("\n" + "─" * 40)
+    log("7A: Explicit cache_control markers")
+    log("─" * 40)
+    
+    cache_on = {"tools_last": True, "system_last": True}
+
+    m1 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS, messages,
+                           "7Aa: Original tools (explicit, expect WRITE)",
+                           cache_controls=cache_on)
+    time.sleep(2)
+
+    m2 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS, messages,
+                           "7Ab: Same tools (explicit, expect READ)",
+                           cache_controls=cache_on)
+    time.sleep(2)
+
+    m3 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS + [{"toolSpec": {"name": EXTRA_TOOL_MESSAGES["name"],
+                                "description": EXTRA_TOOL_MESSAGES["description"],
+                                "inputSchema": {"json": EXTRA_TOOL_MESSAGES["input_schema"]}}}],
+                           messages,
+                           "7Ac: Changed tools (explicit, expect WRITE — cascade)",
+                           cache_controls=cache_on)
+    time.sleep(2)
+
+    m4 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS, messages,
+                           "7Ad: Back to original (explicit, expect READ)",
+                           cache_controls=cache_on)
+
+    # ── 7B: No cache_control (Simplified Cache) ──
+    log("\n" + "─" * 40)
+    log("7B: No explicit cache_control (Simplified Cache)")
+    log("─" * 40)
+
+    time.sleep(3)
+
+    m5 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS, messages,
+                           "7Ba: Original tools (no markers, expect auto-WRITE or NONE)")
+    time.sleep(2)
+
+    m6 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS, messages,
+                           "7Bb: Same tools (no markers, expect auto-READ if Simplified Cache)")
+    time.sleep(2)
+
+    m7 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS + [{"toolSpec": {"name": EXTRA_TOOL_MESSAGES["name"],
+                                "description": EXTRA_TOOL_MESSAGES["description"],
+                                "inputSchema": {"json": EXTRA_TOOL_MESSAGES["input_schema"]}}}],
+                           messages,
+                           "7Bc: Changed tools (no markers, expect WRITE if Simplified, or NONE)")
+    time.sleep(2)
+
+    m8 = call_messages_api(client, model_id,
+                           [{"type": "text", "text": system_text}],
+                           TOOL_DEFINITIONS, messages,
+                           "7Bd: Back to original (no markers, expect READ if Simplified)")
+
+    return m1, m2, m3, m4, m5, m6, m7, m8
+
+
 # ═══════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════
@@ -398,8 +610,8 @@ def main():
                        help="Model ID (default: Claude Sonnet 4)")
     parser.add_argument("--region", default="us-east-1",
                        help="AWS region (default: us-east-1)")
-    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5, 6],
-                       help="Run specific test only (1-6)")
+    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5, 6, 7],
+                       help="Run specific test only (1-7)")
     args = parser.parse_args()
     
     log(f"Bedrock Prompt Caching POC")
@@ -418,9 +630,10 @@ def main():
         4: ("No cache baseline", test_4_no_cache_control_baseline),
         5: ("Cache invalidation", test_5_cache_invalidation),
         6: ("Tools change cascading invalidation", test_6_tools_change_cascading_invalidation),
+        7: ("Messages API tools change + Simplified Cache", test_7_messages_api_tools_change),
     }
     
-    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6]
+    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6, 7]
     
     for test_num in run_tests:
         name, func = tests[test_num]
