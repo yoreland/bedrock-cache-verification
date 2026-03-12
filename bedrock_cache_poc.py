@@ -600,6 +600,116 @@ def test_7_messages_api_tools_change(client, model_id):
     return m1, m2, m3, m4, m5, m6, m7, m8
 
 
+def generate_conversation_turns(num_turns):
+    """Generate multi-turn conversation messages.
+    Each turn = 1 user block + 1 assistant block = 2 content blocks.
+    """
+    topics = [
+        ("What is Amazon S3?", "Amazon S3 is an object storage service offering scalability, data availability, security, and performance."),
+        ("How does S3 pricing work?", "S3 pricing is based on storage used, requests made, data transfer out, and optional features like analytics."),
+        ("What are S3 storage classes?", "S3 offers Standard, Intelligent-Tiering, Standard-IA, One Zone-IA, Glacier Instant Retrieval, Glacier Flexible, and Glacier Deep Archive."),
+        ("What is Amazon EC2?", "Amazon EC2 provides scalable computing capacity in the AWS cloud, allowing you to launch virtual servers as needed."),
+        ("What EC2 instance types are available?", "EC2 offers General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, and Accelerated Computing families."),
+        ("How does EC2 Auto Scaling work?", "EC2 Auto Scaling monitors your applications and automatically adjusts capacity to maintain steady, predictable performance."),
+        ("What is Amazon RDS?", "Amazon RDS makes it easy to set up, operate, and scale a relational database in the cloud with support for multiple engines."),
+        ("What databases does RDS support?", "RDS supports MySQL, PostgreSQL, MariaDB, Oracle, SQL Server, and Amazon Aurora."),
+        ("What is Amazon Lambda?", "AWS Lambda lets you run code without provisioning or managing servers, paying only for the compute time consumed."),
+        ("What are Lambda triggers?", "Lambda can be triggered by S3 events, API Gateway, DynamoDB Streams, SNS, SQS, CloudWatch Events, and more."),
+        ("What is Amazon DynamoDB?", "DynamoDB is a fully managed NoSQL database service that provides fast and predictable performance with seamless scalability."),
+        ("How does DynamoDB pricing work?", "DynamoDB pricing is based on read/write capacity units, storage, and optional features like DAX, global tables, and backups."),
+    ]
+    messages = []
+    for i in range(num_turns):
+        q, a = topics[i % len(topics)]
+        # Add turn number to make each message unique
+        messages.append({
+            "role": "user",
+            "content": [{"type": "text", "text": f"[Turn {i+1}] {q}"}]
+        })
+        messages.append({
+            "role": "assistant",
+            "content": [{"type": "text", "text": f"[Turn {i+1}] {a}"}]
+        })
+    return messages
+
+
+def test_8_block_growth_beyond_20(client, model_id):
+    """Test 8: Messages API — cache behavior when conversation grows beyond 20 content blocks.
+    
+    Each turn = 1 user message + 1 assistant message = 2 content blocks.
+    We place cache_control on the last assistant message's content block.
+    
+    Phases:
+      8a: 9 turns (18 blocks) + new user = 19 blocks — under 20, cache write
+      8b: Same 9 turns + same user — should cache read
+      8c: 10 turns (20 blocks) + new user = 21 blocks — crosses 20 boundary
+      8d: Same 10 turns + same user — does previous cache still hit?
+      8e: 11 turns (22 blocks) + new user = 23 blocks — further growth
+      8f: Same 11 turns + same user — cache behavior?
+    """
+    log("\n\n" + "█" * 60)
+    log("TEST 8: Block growth beyond 20 — cache_control on last assistant")
+    log("█" * 60)
+    log("Using Messages API with explicit cache_control on last assistant block")
+    log("Tracking cache behavior as conversation grows past 20 content blocks")
+
+    system_blocks = [{"type": "text", "text": SYSTEM_PROMPT}]
+    new_question = {"role": "user", "content": [
+        {"type": "text", "text": "Now summarize everything we discussed."}
+    ]}
+
+    results = []
+
+    for num_turns, label in [
+        (9, "18 blocks + 1 user = 19 total"),
+        (10, "20 blocks + 1 user = 21 total"),
+        (11, "22 blocks + 1 user = 23 total"),
+    ]:
+        history = generate_conversation_turns(num_turns)
+        total_blocks = num_turns * 2 + 1  # +1 for the new user question
+
+        # Deep copy to avoid mutation between calls
+        import copy
+
+        # Add cache_control to last assistant message's content
+        last_assistant_content = history[-1]["content"][-1]
+        last_assistant_content["cache_control"] = {"type": "ephemeral"}
+
+        # Also mark system
+        system_with_cache = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+
+        messages = history + [new_question]
+
+        # Call A: First call — should write
+        label_a = f"8-{num_turns}a: {label} — first call"
+        m_a = call_messages_api(client, model_id, copy.deepcopy(system_with_cache), None,
+                                copy.deepcopy(messages), label_a, cache_controls=None)
+        time.sleep(2)
+
+        # Call B: Same — should read
+        label_b = f"8-{num_turns}b: {label} — same (cache check)"
+        m_b = call_messages_api(client, model_id, copy.deepcopy(system_with_cache), None,
+                                copy.deepcopy(messages), label_b, cache_controls=None)
+        
+        results.extend([m_a, m_b])
+        time.sleep(3)
+
+    # Summary
+    log("\n" + "─" * 40)
+    log("Test 8 Summary: Block growth")
+    log("─" * 40)
+    block_counts = [19, 19, 21, 21, 23, 23]
+    labels = ["9t-first", "9t-same", "10t-first", "10t-same", "11t-first", "11t-same"]
+    for i, (m, bc, lb) in enumerate(zip(results, block_counts, labels)):
+        if m:
+            status = "✅ HIT" if m['cacheReadInputTokens'] > 0 else \
+                     "📝 WRITE" if m['cacheWriteInputTokens'] > 0 else \
+                     "⚪ NONE"
+            log(f"  {lb} ({bc} blocks): {status} read={m['cacheReadInputTokens']} write={m['cacheWriteInputTokens']} input={m['inputTokens']}")
+
+    return tuple(results)
+
+
 # ═══════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════
@@ -610,8 +720,8 @@ def main():
                        help="Model ID (default: Claude Sonnet 4)")
     parser.add_argument("--region", default="us-east-1",
                        help="AWS region (default: us-east-1)")
-    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5, 6, 7],
-                       help="Run specific test only (1-7)")
+    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8],
+                       help="Run specific test only (1-8)")
     args = parser.parse_args()
     
     log(f"Bedrock Prompt Caching POC")
@@ -631,9 +741,10 @@ def main():
         5: ("Cache invalidation", test_5_cache_invalidation),
         6: ("Tools change cascading invalidation", test_6_tools_change_cascading_invalidation),
         7: ("Messages API tools change + Simplified Cache", test_7_messages_api_tools_change),
+        8: ("Block growth beyond 20", test_8_block_growth_beyond_20),
     }
     
-    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6, 7]
+    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6, 7, 8]
     
     for test_num in run_tests:
         name, func = tests[test_num]

@@ -14,6 +14,7 @@ POC to verify AWS Bedrock Claude prompt caching behavior via the Converse API an
 | **6** | Tools change — cascading cache invalidation | Converse |
 | **7A** | Tools change with explicit `cache_control` | Messages |
 | **7B** | Tools change without markers (Simplified Cache) | Messages |
+| **8** | Block growth beyond 20 — cache behavior at scale | Messages |
 
 ## Quick Start
 
@@ -78,6 +79,24 @@ Same pattern, but with **no `cache_control` markers** — testing whether Bedroc
 - Zero cache activity across all calls. **Simplified Cache does not activate on Bedrock's Messages API (invoke_model)**, even for Sonnet 4.5.
 - Without explicit `cache_control` markers, no caching occurs — all input tokens are billed at full price.
 
+### Test 8: Block Growth Beyond 20 — Messages API with `cache_control`
+
+Multi-turn conversation growing from 19 to 23 content blocks. `cache_control` placed on the last assistant message and system prompt.
+
+| Call | Turns | Total Blocks | Cache Read | Cache Write | Result |
+|------|-------|-------------|-----------|-------------|--------|
+| 8-9a | 9 | 19 | 0 | 4,798 | 📝 WRITE |
+| 8-9b | 9 | 19 | 4,798 | 0 | ✅ HIT |
+| 8-10a | 10 | 21 | 4,798 | 54 | ✅ HIT + incremental WRITE |
+| 8-10b | 10 | 21 | 4,852 | 0 | ✅ HIT |
+| 8-11a | 11 | 23 | 4,852 | 47 | ✅ HIT + incremental WRITE |
+| 8-11b | 11 | 23 | 4,899 | 0 | ✅ HIT |
+
+**Observations:**
+- Explicit `cache_control` works correctly beyond 20 content blocks. The "20 block" limit only applies to Simplified Cache's automatic checkpoint window.
+- As conversation grows, the cache shows **incremental behavior**: the prefix (system + earlier turns) hits from cache, and only the newly added turn is written (54 and 47 tokens respectively).
+- Total cached tokens grow incrementally: 4,798 → 4,852 → 4,899, matching the added conversation content.
+
 ## Key Findings
 
 1. **Each `cachePoint` is evaluated independently** — Changing tools does not fully invalidate the system cache. If the system prompt content is identical, its `cachePoint` still hits. This means the cache is more granular than pure prefix-matching: each checkpoint tracks its own content hash.
@@ -100,6 +119,8 @@ Same pattern, but with **no `cache_control` markers** — testing whether Bedroc
      ]
    }
    ```
+
+7. **Explicit `cache_control` works beyond 20 content blocks** — The "20 block boundary" limit only applies to Simplified Cache's automatic checkpoint placement. With explicit `cache_control` markers, caching works correctly at 19, 21, and 23+ blocks. Each additional turn adds an incremental cache write for the new content while the prefix remains cached.
 
 ## Converse API vs Messages API
 
