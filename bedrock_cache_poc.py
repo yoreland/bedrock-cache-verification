@@ -782,6 +782,293 @@ def test_8_simplified_cache_20_block_boundary(client, model_id):
     return tuple(results)
 
 
+def test_9_lookback_window_verification(client, model_id):
+    """Test 9: Clean verification of simplified cache 20-block lookback window.
+    
+    Uses UUID-stamped content to guarantee no cache residue from prior runs.
+    
+    Two sub-tests:
+      9A: Simplified mode (1 cache_control on last assistant only)
+          - Establish 30-block cache
+          - Modify early block (#1) vs late block (#25) — does lookback matter?
+          - Modify system / add tools — full miss?
+          
+      9B: Manual mode (cache_control on system + last assistant = 2 checkpoints)
+          - Same modifications — does independent checkpoint evaluation help?
+    """
+    import copy
+    import uuid
+
+    run_id = uuid.uuid4().hex[:8]  # unique per run to avoid cache residue
+    log("\n\n" + "█" * 60)
+    log(f"TEST 9: Clean lookback verification (run_id={run_id})")
+    log("█" * 60)
+    log("All content stamped with unique run_id to avoid cache residue")
+
+    # Unique system prompt for this run
+    system_text = f"{SYSTEM_PROMPT}\n[run_id={run_id}]"
+
+    def build_conversation(num_turns=15, modify_block=None, extra_system_text=None):
+        """Build a unique conversation. 15 turns = 30 blocks + 1 final user = 31 blocks."""
+        msgs = []
+        block_idx = 0
+        for i in range(num_turns):
+            user_text = f"[{run_id}][Turn {i+1}] Tell me about AWS service #{i+1}."
+            asst_text = (f"[{run_id}][Turn {i+1}] Service {i+1} provides HA, security, "
+                         f"scalability, multi-region, and integrates with other AWS services.")
+
+            if modify_block is not None and block_idx == modify_block:
+                user_text = f"[{run_id}][Turn {i+1}] MODIFIED QUESTION about service #{i+1}."
+            msgs.append({"role": "user", "content": [{"type": "text", "text": user_text}]})
+            block_idx += 1
+
+            if modify_block is not None and block_idx == modify_block:
+                asst_text = f"[{run_id}][Turn {i+1}] MODIFIED ANSWER about service #{i+1}."
+            msgs.append({"role": "assistant", "content": [{"type": "text", "text": asst_text}]})
+            block_idx += 1
+
+        msgs.append({"role": "user", "content": [
+            {"type": "text", "text": f"[{run_id}] Summarize all services."}
+        ]})
+
+        sys = [{"type": "text", "text": extra_system_text or system_text}]
+        return sys, msgs
+
+    results = []
+    labels = []
+
+    def run_call(sys, tools, msgs, label):
+        m = call_messages_api(client, model_id, copy.deepcopy(sys), tools,
+                              copy.deepcopy(msgs), label)
+        results.append(m)
+        labels.append(label)
+        time.sleep(2)
+        return m
+
+    # ═══════════════════════════════════════════
+    # 9A: Simplified mode — 1 checkpoint only
+    # ═══════════════════════════════════════════
+    log("\n" + "─" * 50)
+    log("9A: SIMPLIFIED MODE (1 cache_control on last assistant)")
+    log("─" * 50)
+
+    sys_orig, msgs_orig = build_conversation()
+    # Only 1 cache_control: last assistant block
+    msgs_orig[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+
+    run_call(sys_orig, None, msgs_orig, "9Aa: establish cache (31 blocks)")
+    run_call(sys_orig, None, msgs_orig, "9Ab: same — verify warm")
+
+    # Modify early block (#1 = Turn 1 assistant)
+    sys_early, msgs_early = build_conversation(modify_block=1)
+    msgs_early[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+    run_call(sys_early, None, msgs_early, "9Ac: modify block #1 (early)")
+
+    # Modify late block (#25 = Turn 13 assistant)
+    sys_late, msgs_late = build_conversation(modify_block=25)
+    msgs_late[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+    run_call(sys_late, None, msgs_late, "9Ad: modify block #25 (late)")
+
+    # Modify system prompt
+    sys_mod, msgs_sysmod = build_conversation(extra_system_text=system_text + " Always mention pricing.")
+    msgs_sysmod[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+    run_call(sys_mod, None, msgs_sysmod, "9Ae: modified system")
+
+    # Add tools (original system + messages)
+    run_call(sys_orig, TOOL_DEFINITIONS, msgs_orig, "9Af: added tools")
+
+    # Extend: add 1 more turn (33 blocks)
+    sys_ext, msgs_ext = build_conversation(num_turns=16)
+    msgs_ext[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+    run_call(sys_ext, None, msgs_ext, "9Ag: extended to 33 blocks")
+
+    # Back to original
+    run_call(sys_orig, None, msgs_orig, "9Ah: back to original")
+
+    # ═══════════════════════════════════════════
+    # 9B: Manual mode — 2 checkpoints
+    # ═══════════════════════════════════════════
+    log("\n" + "─" * 50)
+    log("9B: MANUAL MODE (cache_control on system + last assistant)")
+    log("─" * 50)
+
+    run_id_b = uuid.uuid4().hex[:8]
+    system_text_b = f"{SYSTEM_PROMPT}\n[run_id={run_id_b}]"
+
+    def build_conv_b(num_turns=15, modify_block=None, extra_system_text=None):
+        msgs = []
+        block_idx = 0
+        for i in range(num_turns):
+            user_text = f"[{run_id_b}][Turn {i+1}] Tell me about AWS service #{i+1}."
+            asst_text = (f"[{run_id_b}][Turn {i+1}] Service {i+1} provides HA, security, "
+                         f"scalability, multi-region, and integrates with other AWS services.")
+            if modify_block is not None and block_idx == modify_block:
+                user_text = f"[{run_id_b}][Turn {i+1}] MODIFIED QUESTION about service #{i+1}."
+            msgs.append({"role": "user", "content": [{"type": "text", "text": user_text}]})
+            block_idx += 1
+            if modify_block is not None and block_idx == modify_block:
+                asst_text = f"[{run_id_b}][Turn {i+1}] MODIFIED ANSWER about service #{i+1}."
+            msgs.append({"role": "assistant", "content": [{"type": "text", "text": asst_text}]})
+            block_idx += 1
+        msgs.append({"role": "user", "content": [
+            {"type": "text", "text": f"[{run_id_b}] Summarize all services."}
+        ]})
+        sys = [{"type": "text", "text": extra_system_text or system_text_b}]
+        return sys, msgs
+
+    # 2 checkpoints: system + last assistant
+    def add_manual_markers(sys, msgs):
+        sys[0]["cache_control"] = {"type": "ephemeral"}
+        msgs[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+
+    sys_b_orig, msgs_b_orig = build_conv_b()
+    add_manual_markers(sys_b_orig, msgs_b_orig)
+    run_call(sys_b_orig, None, msgs_b_orig, "9Ba: establish cache (2 checkpoints)")
+    run_call(sys_b_orig, None, msgs_b_orig, "9Bb: same — verify warm")
+
+    # Modify early block
+    sys_b_early, msgs_b_early = build_conv_b(modify_block=1)
+    add_manual_markers(sys_b_early, msgs_b_early)
+    run_call(sys_b_early, None, msgs_b_early, "9Bc: modify block #1 (early)")
+
+    # Modify late block
+    sys_b_late, msgs_b_late = build_conv_b(modify_block=25)
+    add_manual_markers(sys_b_late, msgs_b_late)
+    run_call(sys_b_late, None, msgs_b_late, "9Bd: modify block #25 (late)")
+
+    # Modify system
+    sys_b_mod, msgs_b_sysmod = build_conv_b(extra_system_text=system_text_b + " Always mention pricing.")
+    add_manual_markers(sys_b_mod, msgs_b_sysmod)
+    run_call(sys_b_mod, None, msgs_b_sysmod, "9Be: modified system (2 checkpoints)")
+
+    # Back to original
+    run_call(sys_b_orig, None, msgs_b_orig, "9Bf: back to original")
+
+    # Summary
+    log("\n" + "─" * 50)
+    log(f"Test 9 Summary (run_id A={run_id}, B={run_id_b})")
+    log("─" * 50)
+    for lb, m in zip(labels, results):
+        if m:
+            status = "✅ HIT" if m['cacheReadInputTokens'] > 0 else \
+                     "📝 WRITE" if m['cacheWriteInputTokens'] > 0 else \
+                     "⚪ NONE"
+            log(f"  {lb}: {status} read={m['cacheReadInputTokens']} "
+                f"write={m['cacheWriteInputTokens']} input={m['inputTokens']}")
+
+    return tuple(results)
+
+
+def test_10_sliding_window_cache(client, model_id):
+    """Test 10: Sliding window cache — drop early blocks, keep recent ones.
+    
+    Idea: maintain a ~20 block conversation window. As new turns arrive,
+    drop the oldest turns. Use 2 checkpoints (system + last assistant).
+    
+    Question: when we drop early blocks, does the remaining suffix still
+    hit cache from the previous version that included those blocks?
+    
+    Scenario (all unique content via UUID):
+      10a: 10 turns (20 msg blocks) + system checkpoint + last assistant checkpoint → WRITE
+      10b: Same → HIT (verify warm)
+      10c: Drop first 2 turns, keep turns 3-10 (16 blocks) → HIT or MISS?
+      10d: Same as 10c → HIT (verify)
+      10e: Drop first 2, add 2 new turns at end (turns 3-12, 20 blocks) → partial HIT?
+      10f: Same as 10e → HIT (verify)
+      10g: Slide again: turns 5-14 (20 blocks) → partial HIT?
+      10h: Same as 10g → HIT (verify)
+    """
+    import copy
+    import uuid
+
+    run_id = uuid.uuid4().hex[:8]
+    log("\n\n" + "█" * 60)
+    log(f"TEST 10: Sliding window cache (run_id={run_id})")
+    log("█" * 60)
+    log("2 checkpoints: system + last assistant")
+    log("Sliding window: drop old turns, add new ones, check cache behavior")
+
+    system_text = f"{SYSTEM_PROMPT}\n[run_id={run_id}]"
+
+    def build_windowed_conversation(start_turn, end_turn):
+        """Build conversation from turn start_turn to end_turn (inclusive).
+        Each turn = 1 user + 1 assistant = 2 blocks.
+        """
+        msgs = []
+        for i in range(start_turn, end_turn + 1):
+            msgs.append({"role": "user", "content": [
+                {"type": "text", "text": f"[{run_id}][Turn {i}] Question about AWS service #{i}."}
+            ]})
+            msgs.append({"role": "assistant", "content": [
+                {"type": "text", "text": (f"[{run_id}][Turn {i}] Service {i} provides HA, security, "
+                    f"scalability, multi-region support, and integrates with other AWS services.")}
+            ]})
+        # Final user question
+        msgs.append({"role": "user", "content": [
+            {"type": "text", "text": f"[{run_id}] What should I use next?"}
+        ]})
+
+        # 2 checkpoints: system + last assistant
+        sys = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
+        msgs[-2]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+
+        total_blocks = count_content_blocks(msgs)
+        return sys, msgs, total_blocks
+
+    results = []
+    labels = []
+
+    def run_call(sys, msgs, label, total_blocks=None):
+        extra = f" ({total_blocks} blocks)" if total_blocks else ""
+        m = call_messages_api(client, model_id, copy.deepcopy(sys), None,
+                              copy.deepcopy(msgs), f"{label}{extra}")
+        results.append(m)
+        labels.append(f"{label}{extra}")
+        time.sleep(2)
+        return m
+
+    # 10a: Window = turns 1-10 (20 message blocks)
+    sys_a, msgs_a, blocks_a = build_windowed_conversation(1, 10)
+    run_call(sys_a, msgs_a, "10a: turns 1-10", blocks_a)
+    run_call(sys_a, msgs_a, "10b: same (verify)", blocks_a)
+
+    # 10c: Drop turns 1-2, keep turns 3-10 (16 message blocks)
+    sys_c, msgs_c, blocks_c = build_windowed_conversation(3, 10)
+    run_call(sys_c, msgs_c, "10c: turns 3-10 (dropped 1-2)", blocks_c)
+    run_call(sys_c, msgs_c, "10d: same (verify)", blocks_c)
+
+    # 10e: Slide window: turns 3-12 (20 message blocks, added 11-12)
+    sys_e, msgs_e, blocks_e = build_windowed_conversation(3, 12)
+    run_call(sys_e, msgs_e, "10e: turns 3-12 (slide +2)", blocks_e)
+    run_call(sys_e, msgs_e, "10f: same (verify)", blocks_e)
+
+    # 10g: Slide again: turns 5-14 (20 message blocks)
+    sys_g, msgs_g, blocks_g = build_windowed_conversation(5, 14)
+    run_call(sys_g, msgs_g, "10g: turns 5-14 (slide +2)", blocks_g)
+    run_call(sys_g, msgs_g, "10h: same (verify)", blocks_g)
+
+    # Summary
+    log("\n" + "─" * 55)
+    log(f"Test 10 Summary: Sliding window (run_id={run_id})")
+    log("─" * 55)
+    for lb, m in zip(labels, results):
+        if m:
+            status = "✅ HIT" if m['cacheReadInputTokens'] > 0 else \
+                     "📝 WRITE" if m['cacheWriteInputTokens'] > 0 else \
+                     "⚪ NONE"
+            log(f"  {lb}: {status} read={m['cacheReadInputTokens']} "
+                f"write={m['cacheWriteInputTokens']}")
+
+    log("\n  KEY INSIGHT:")
+    if results[2] and results[2]['cacheReadInputTokens'] > 0:
+        log(f"  10c (dropped early turns): PARTIAL HIT read={results[2]['cacheReadInputTokens']}"
+            f" → system checkpoint survived! Sliding window viable.")
+    else:
+        log("  10c (dropped early turns): FULL MISS → dropping early turns = full re-cache")
+
+    return tuple(results)
+
+
 # ═══════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════
@@ -792,8 +1079,8 @@ def main():
                        help="Model ID (default: Claude Sonnet 4)")
     parser.add_argument("--region", default="us-east-1",
                        help="AWS region (default: us-east-1)")
-    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8],
-                       help="Run specific test only (1-8)")
+    parser.add_argument("--test", type=int, choices=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                       help="Run specific test only (1-10)")
     args = parser.parse_args()
     
     log(f"Bedrock Prompt Caching POC")
@@ -814,9 +1101,11 @@ def main():
         6: ("Tools change cascading invalidation", test_6_tools_change_cascading_invalidation),
         7: ("Messages API tools change + Simplified Cache", test_7_messages_api_tools_change),
         8: ("Simplified cache 20-block boundary", test_8_simplified_cache_20_block_boundary),
+        9: ("Lookback window verification", test_9_lookback_window_verification),
+        10: ("Sliding window cache", test_10_sliding_window_cache),
     }
     
-    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6, 7, 8]
+    run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     
     for test_num in run_tests:
         name, func = tests[test_num]
