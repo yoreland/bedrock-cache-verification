@@ -600,112 +600,184 @@ def test_7_messages_api_tools_change(client, model_id):
     return m1, m2, m3, m4, m5, m6, m7, m8
 
 
-def generate_conversation_turns(num_turns):
+def generate_conversation_turns(num_turns, blocks_per_assistant=1):
     """Generate multi-turn conversation messages.
-    Each turn = 1 user block + 1 assistant block = 2 content blocks.
+    
+    Args:
+        num_turns: Number of conversation turns.
+        blocks_per_assistant: Number of text blocks in each assistant message.
+            1 = standard (1 user block + 1 assistant block = 2 blocks per turn)
+            3 = multi-block (1 user block + 3 assistant blocks = 4 blocks per turn)
     """
     topics = [
-        ("What is Amazon S3?", "Amazon S3 is an object storage service offering scalability, data availability, security, and performance."),
-        ("How does S3 pricing work?", "S3 pricing is based on storage used, requests made, data transfer out, and optional features like analytics."),
-        ("What are S3 storage classes?", "S3 offers Standard, Intelligent-Tiering, Standard-IA, One Zone-IA, Glacier Instant Retrieval, Glacier Flexible, and Glacier Deep Archive."),
-        ("What is Amazon EC2?", "Amazon EC2 provides scalable computing capacity in the AWS cloud, allowing you to launch virtual servers as needed."),
-        ("What EC2 instance types are available?", "EC2 offers General Purpose, Compute Optimized, Memory Optimized, Storage Optimized, and Accelerated Computing families."),
-        ("How does EC2 Auto Scaling work?", "EC2 Auto Scaling monitors your applications and automatically adjusts capacity to maintain steady, predictable performance."),
-        ("What is Amazon RDS?", "Amazon RDS makes it easy to set up, operate, and scale a relational database in the cloud with support for multiple engines."),
-        ("What databases does RDS support?", "RDS supports MySQL, PostgreSQL, MariaDB, Oracle, SQL Server, and Amazon Aurora."),
-        ("What is Amazon Lambda?", "AWS Lambda lets you run code without provisioning or managing servers, paying only for the compute time consumed."),
-        ("What are Lambda triggers?", "Lambda can be triggered by S3 events, API Gateway, DynamoDB Streams, SNS, SQS, CloudWatch Events, and more."),
-        ("What is Amazon DynamoDB?", "DynamoDB is a fully managed NoSQL database service that provides fast and predictable performance with seamless scalability."),
-        ("How does DynamoDB pricing work?", "DynamoDB pricing is based on read/write capacity units, storage, and optional features like DAX, global tables, and backups."),
+        ("What is Amazon S3?",
+         ["Amazon S3 is an object storage service offering scalability, data availability, security, and performance.",
+          "S3 stores data as objects within buckets, with virtually unlimited storage capacity.",
+          "It supports lifecycle policies, versioning, encryption, and cross-region replication."]),
+        ("How does S3 pricing work?",
+         ["S3 pricing is based on storage used, requests made, data transfer out, and optional features.",
+          "Storage classes have different price tiers: Standard is most expensive, Glacier Deep Archive is cheapest.",
+          "Data transfer IN is free, but transfer OUT and API requests incur charges."]),
+        ("What are S3 storage classes?",
+         ["S3 offers Standard, Intelligent-Tiering, Standard-IA, One Zone-IA, and Glacier tiers.",
+          "Intelligent-Tiering automatically moves objects between access tiers based on usage patterns.",
+          "Glacier classes are for archival with retrieval times from minutes to hours."]),
+        ("What is Amazon EC2?",
+         ["Amazon EC2 provides scalable computing capacity in the AWS cloud.",
+          "You can launch virtual servers (instances) with various CPU, memory, and storage configurations.",
+          "EC2 supports multiple pricing models: On-Demand, Reserved, Spot, and Savings Plans."]),
+        ("What EC2 instance types are available?",
+         ["EC2 offers General Purpose (M/T), Compute Optimized (C), Memory Optimized (R/X) families.",
+          "Storage Optimized (I/D) instances provide high sequential read/write for large datasets.",
+          "Accelerated Computing (P/G) instances use hardware accelerators like GPUs."]),
+        ("How does EC2 Auto Scaling work?",
+         ["EC2 Auto Scaling monitors applications and automatically adjusts capacity for performance.",
+          "You define scaling policies based on metrics like CPU utilization or request count.",
+          "It can scale across multiple AZs for high availability and cost optimization."]),
+        ("What is Amazon RDS?",
+         ["Amazon RDS simplifies setup, operation, and scaling of relational databases in the cloud.",
+          "It automates routine tasks like hardware provisioning, database setup, and patching.",
+          "RDS provides automated backups, database snapshots, and multi-AZ deployments."]),
+        ("What databases does RDS support?",
+         ["RDS supports MySQL, PostgreSQL, MariaDB, Oracle, SQL Server, and Amazon Aurora.",
+          "Aurora is Amazon's cloud-native database with up to 5x MySQL and 3x PostgreSQL throughput.",
+          "Each engine has specific version support and feature availability."]),
+        ("What is AWS Lambda?",
+         ["AWS Lambda lets you run code without provisioning or managing servers.",
+          "You pay only for the compute time consumed, billed in 1ms increments.",
+          "Lambda automatically scales from a few requests per day to thousands per second."]),
+        ("What are Lambda triggers?",
+         ["Lambda can be triggered by S3 events, API Gateway, DynamoDB Streams, and more.",
+          "Event source mappings allow Lambda to poll services like SQS, Kinesis, and Kafka.",
+          "You can also invoke Lambda directly via the SDK or create custom event sources."]),
+        ("What is Amazon DynamoDB?",
+         ["DynamoDB is a fully managed NoSQL database providing fast, predictable performance.",
+          "It supports key-value and document data models with single-digit millisecond latency.",
+          "DynamoDB offers built-in security, backup/restore, and in-memory caching."]),
+        ("How does DynamoDB pricing work?",
+         ["DynamoDB pricing is based on read/write capacity units and storage consumed.",
+          "On-Demand mode charges per request; Provisioned mode charges for allocated capacity.",
+          "Optional features like DAX, global tables, and backups have separate pricing."]),
     ]
     messages = []
     for i in range(num_turns):
-        q, a = topics[i % len(topics)]
-        # Add turn number to make each message unique
+        q, answers = topics[i % len(topics)]
         messages.append({
             "role": "user",
             "content": [{"type": "text", "text": f"[Turn {i+1}] {q}"}]
         })
+        # Use requested number of blocks for assistant
+        assistant_blocks = []
+        for b in range(blocks_per_assistant):
+            text = answers[b % len(answers)] if b < len(answers) else answers[-1]
+            assistant_blocks.append({"type": "text", "text": f"[Turn {i+1}.{b+1}] {text}"})
         messages.append({
             "role": "assistant",
-            "content": [{"type": "text", "text": f"[Turn {i+1}] {a}"}]
+            "content": assistant_blocks
         })
     return messages
 
 
-def test_8_block_growth_beyond_20(client, model_id):
-    """Test 8: Messages API — cache behavior when conversation grows beyond 20 content blocks.
+def count_content_blocks(messages):
+    """Count total content blocks across all messages."""
+    total = 0
+    for msg in messages:
+        content = msg.get("content", [])
+        if isinstance(content, list):
+            total += len(content)
+        else:
+            total += 1
+    return total
+
+
+def test_8_simplified_cache_20_block_boundary(client, model_id):
+    """Test 8: Simplified Cache — behavior at the 20 content block boundary.
     
-    Each turn = 1 user message + 1 assistant message = 2 content blocks.
-    We place cache_control on the last assistant message's content block.
+    Per AWS docs, simplified cache management places ONE cache checkpoint
+    and the system looks back ~20 content blocks from that point.
     
-    Phases:
-      8a: 9 turns (18 blocks) + new user = 19 blocks — under 20, cache write
-      8b: Same 9 turns + same user — should cache read
-      8c: 10 turns (20 blocks) + new user = 21 blocks — crosses 20 boundary
-      8d: Same 10 turns + same user — does previous cache still hit?
-      8e: 11 turns (22 blocks) + new user = 23 blocks — further growth
-      8f: Same 11 turns + same user — cache behavior?
+    This test uses multi-block assistant messages (3 text blocks each) to quickly
+    exceed 20 blocks, with only ONE cache_control marker on the last assistant block.
+    
+    Question: When total blocks > 20, do early blocks (outside the ~20 lookback window)
+    lose cache coverage?
+    
+    Phase A: 4 turns (4 user + 4*3 assistant = 16 blocks) + 1 user = 17 blocks
+    Phase B: 5 turns (5 user + 5*3 assistant = 20 blocks) + 1 user = 21 blocks  
+    Phase C: 7 turns (7 user + 7*3 assistant = 28 blocks) + 1 user = 29 blocks
+    Phase D: 10 turns (10 user + 10*3 assistant = 40 blocks) + 1 user = 41 blocks
+    
+    Only ONE cache_control on the very last assistant block (simplified mode).
     """
     log("\n\n" + "█" * 60)
-    log("TEST 8: Block growth beyond 20 — cache_control on last assistant")
+    log("TEST 8: Simplified Cache — 20 content block boundary")
     log("█" * 60)
-    log("Using Messages API with explicit cache_control on last assistant block")
-    log("Tracking cache behavior as conversation grows past 20 content blocks")
+    log("ONE cache_control on last assistant block only (simplified mode)")
+    log("Assistant messages have 3 text blocks each to grow block count fast")
+    log("Tracking: does lookback window limit cache coverage?")
 
-    system_blocks = [{"type": "text", "text": SYSTEM_PROMPT}]
+    import copy
+
     new_question = {"role": "user", "content": [
         {"type": "text", "text": "Now summarize everything we discussed."}
     ]}
 
+    test_configs = [
+        (4, "4 turns"),
+        (5, "5 turns"),
+        (7, "7 turns"),
+        (10, "10 turns"),
+    ]
+
     results = []
+    result_labels = []
 
-    for num_turns, label in [
-        (9, "18 blocks + 1 user = 19 total"),
-        (10, "20 blocks + 1 user = 21 total"),
-        (11, "22 blocks + 1 user = 23 total"),
-    ]:
-        history = generate_conversation_turns(num_turns)
-        total_blocks = num_turns * 2 + 1  # +1 for the new user question
-
-        # Deep copy to avoid mutation between calls
-        import copy
-
-        # Add cache_control to last assistant message's content
-        last_assistant_content = history[-1]["content"][-1]
-        last_assistant_content["cache_control"] = {"type": "ephemeral"}
-
-        # Also mark system
-        system_with_cache = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
-
+    for num_turns, turn_label in test_configs:
+        history = generate_conversation_turns(num_turns, blocks_per_assistant=3)
         messages = history + [new_question]
+        total_blocks = count_content_blocks(messages)
 
-        # Call A: First call — should write
-        label_a = f"8-{num_turns}a: {label} — first call"
-        m_a = call_messages_api(client, model_id, copy.deepcopy(system_with_cache), None,
-                                copy.deepcopy(messages), label_a, cache_controls=None)
+        # Only ONE cache_control on last assistant block (simplified mode)
+        # Find last assistant message, mark its last content block
+        for msg in reversed(history):
+            if msg["role"] == "assistant":
+                msg["content"][-1]["cache_control"] = {"type": "ephemeral"}
+                break
+
+        log(f"\n  {turn_label}: {total_blocks} content blocks (user: {num_turns}, "
+            f"assistant: {num_turns}×3={num_turns*3}, +1 final user)")
+
+        # Call A: First
+        label_a = f"8-{turn_label}: {total_blocks} blocks — first call"
+        m_a = call_messages_api(client, model_id, 
+                                [{"type": "text", "text": SYSTEM_PROMPT}],
+                                None, copy.deepcopy(messages), label_a)
         time.sleep(2)
 
-        # Call B: Same — should read
-        label_b = f"8-{num_turns}b: {label} — same (cache check)"
-        m_b = call_messages_api(client, model_id, copy.deepcopy(system_with_cache), None,
-                                copy.deepcopy(messages), label_b, cache_controls=None)
-        
+        # Call B: Same — cache check
+        label_b = f"8-{turn_label}: {total_blocks} blocks — same (cache check)"
+        m_b = call_messages_api(client, model_id,
+                                [{"type": "text", "text": SYSTEM_PROMPT}],
+                                None, copy.deepcopy(messages), label_b)
+
         results.extend([m_a, m_b])
+        result_labels.extend([
+            f"{turn_label}-first ({total_blocks} blocks)",
+            f"{turn_label}-same  ({total_blocks} blocks)",
+        ])
         time.sleep(3)
 
     # Summary
-    log("\n" + "─" * 40)
-    log("Test 8 Summary: Block growth")
-    log("─" * 40)
-    block_counts = [19, 19, 21, 21, 23, 23]
-    labels = ["9t-first", "9t-same", "10t-first", "10t-same", "11t-first", "11t-same"]
-    for i, (m, bc, lb) in enumerate(zip(results, block_counts, labels)):
+    log("\n" + "─" * 50)
+    log("Test 8 Summary: Simplified cache 20-block boundary")
+    log("─" * 50)
+    for lb, m in zip(result_labels, results):
         if m:
             status = "✅ HIT" if m['cacheReadInputTokens'] > 0 else \
                      "📝 WRITE" if m['cacheWriteInputTokens'] > 0 else \
                      "⚪ NONE"
-            log(f"  {lb} ({bc} blocks): {status} read={m['cacheReadInputTokens']} write={m['cacheWriteInputTokens']} input={m['inputTokens']}")
+            log(f"  {lb}: {status} read={m['cacheReadInputTokens']} "
+                f"write={m['cacheWriteInputTokens']} input={m['inputTokens']}")
 
     return tuple(results)
 
@@ -741,7 +813,7 @@ def main():
         5: ("Cache invalidation", test_5_cache_invalidation),
         6: ("Tools change cascading invalidation", test_6_tools_change_cascading_invalidation),
         7: ("Messages API tools change + Simplified Cache", test_7_messages_api_tools_change),
-        8: ("Block growth beyond 20", test_8_block_growth_beyond_20),
+        8: ("Simplified cache 20-block boundary", test_8_simplified_cache_20_block_boundary),
     }
     
     run_tests = [args.test] if args.test else [1, 2, 3, 4, 5, 6, 7, 8]

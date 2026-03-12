@@ -14,7 +14,7 @@ POC to verify AWS Bedrock Claude prompt caching behavior via the Converse API an
 | **6** | Tools change — cascading cache invalidation | Converse |
 | **7A** | Tools change with explicit `cache_control` | Messages |
 | **7B** | Tools change without markers (Simplified Cache) | Messages |
-| **8** | Block growth beyond 20 — cache behavior at scale | Messages |
+| **8** | Simplified cache: single checkpoint + 20-block boundary | Messages |
 
 ## Quick Start
 
@@ -79,23 +79,24 @@ Same pattern, but with **no `cache_control` markers** — testing whether Bedroc
 - Zero cache activity across all calls. **Simplified Cache does not activate on Bedrock's Messages API (invoke_model)**, even for Sonnet 4.5.
 - Without explicit `cache_control` markers, no caching occurs — all input tokens are billed at full price.
 
-### Test 8: Block Growth Beyond 20 — Messages API with `cache_control`
+### Test 8: Simplified Cache — Single Checkpoint Beyond 20 Content Blocks
 
-Multi-turn conversation growing from 19 to 23 content blocks. `cache_control` placed on the last assistant message and system prompt.
+Per AWS docs, simplified cache management uses ONE checkpoint and looks back ~20 content blocks. This test uses multi-block assistant messages (3 text blocks each) to quickly exceed 20 blocks, with only ONE `cache_control` on the last assistant block.
 
-| Call | Turns | Total Blocks | Cache Read | Cache Write | Result |
-|------|-------|-------------|-----------|-------------|--------|
-| 8-9a | 9 | 19 | 0 | 4,798 | 📝 WRITE |
-| 8-9b | 9 | 19 | 4,798 | 0 | ✅ HIT |
-| 8-10a | 10 | 21 | 4,798 | 54 | ✅ HIT + incremental WRITE |
-| 8-10b | 10 | 21 | 4,852 | 0 | ✅ HIT |
-| 8-11a | 11 | 23 | 4,852 | 47 | ✅ HIT + incremental WRITE |
-| 8-11b | 11 | 23 | 4,899 | 0 | ✅ HIT |
+| Call | Turns | Content Blocks | Cache Read | Cache Write | Result |
+|------|-------|---------------|-----------|-------------|--------|
+| 8-4t-first | 4 | 17 | 0 | 4,738 | 📝 WRITE |
+| 8-4t-same | 4 | 17 | 4,738 | 0 | ✅ HIT |
+| 8-5t-first | 5 | 21 | 4,738 | 107 | ✅ HIT + incremental |
+| 8-5t-same | 5 | 21 | 4,845 | 0 | ✅ HIT |
+| 8-7t-first | 7 | 29 | 4,845 | 177 | ✅ HIT + incremental |
+| 8-10t-first | 10 | 41 | 5,022 | 266 | ✅ HIT + incremental |
+| 8-10t-same | 10 | 41 | 5,288 | 0 | ✅ HIT |
 
 **Observations:**
-- Explicit `cache_control` works correctly beyond 20 content blocks. The "20 block" limit only applies to Simplified Cache's automatic checkpoint window.
-- As conversation grows, the cache shows **incremental behavior**: the prefix (system + earlier turns) hits from cache, and only the newly added turn is written (54 and 47 tokens respectively).
-- Total cached tokens grow incrementally: 4,798 → 4,852 → 4,899, matching the added conversation content.
+- With a single `cache_control` on the last assistant block, caching works correctly even at **41 content blocks** — well beyond the documented ~20 block lookback window.
+- Cache grows incrementally as conversation extends: prefix hits from previous cache, only new turns are written (107, 177, 266 tokens).
+- The "~20 block" lookback likely refers to the search depth for finding the best matching prefix, not a hard limit on cache storage. Once a prefix match is established, subsequent growth is purely incremental.
 
 ## Key Findings
 
@@ -120,7 +121,7 @@ Multi-turn conversation growing from 19 to 23 content blocks. `cache_control` pl
    }
    ```
 
-7. **Explicit `cache_control` works beyond 20 content blocks** — The "20 block boundary" limit only applies to Simplified Cache's automatic checkpoint placement. With explicit `cache_control` markers, caching works correctly at 19, 21, and 23+ blocks. Each additional turn adds an incremental cache write for the new content while the prefix remains cached.
+7. **Single checkpoint works beyond 20 content blocks** — The documented "~20 block lookback" does not limit cache storage. With one `cache_control` on the last assistant block, caching works correctly at 17, 21, 29, and even 41 content blocks. Cache grows incrementally as conversation extends.
 
 ## Converse API vs Messages API
 
