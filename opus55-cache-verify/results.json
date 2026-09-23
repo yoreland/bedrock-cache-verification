@@ -1,0 +1,28 @@
+{
+  "region": "us-west-2",
+  "model_id_used": "us.anthropic.claude-opus-5-5",
+  "call1_usage": {
+    "inputTokens": 16,
+    "outputTokens": 3,
+    "totalTokens": 18260,
+    "cacheReadInputTokens": 0,
+    "cacheWriteInputTokens": 18241,
+    "cacheDetails": [
+      {
+        "ttl": "5m",
+        "inputTokens": 18241
+      }
+    ]
+  },
+  "call2_usage": {
+    "inputTokens": 16,
+    "outputTokens": 3,
+    "totalTokens": 18260,
+    "cacheReadInputTokens": 18241,
+    "cacheWriteInputTokens": 0
+  },
+  "cache_read_tokens_call2": 18241,
+  "cache_read_price_per_million_usd": 0.2,
+  "estimated_cache_read_cost_usd": 0.0036482000000000003,
+  "cache_hit": true
+}
