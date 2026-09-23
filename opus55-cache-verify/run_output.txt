@@ -1,0 +1,86 @@
+[info] Region: us-west-2
+[info] Cached prefix length: 59399 chars (~14849 tokens, rough 4 chars/token heuristic)
+[info] Trying inference profile: us.anthropic.claude-opus-5-5
+[info] Success with inference profile: us.anthropic.claude-opus-5-5
+
+===== CALL 1 (expect cacheWriteInputTokens > 0) usage (raw) =====
+{
+  "inputTokens": 16,
+  "outputTokens": 3,
+  "totalTokens": 18260,
+  "cacheReadInputTokens": 0,
+  "cacheWriteInputTokens": 18241,
+  "cacheDetails": [
+    {
+      "ttl": "5m",
+      "inputTokens": 18241
+    }
+  ]
+}
+  inputTokens            = 16
+  outputTokens           = 3
+  cacheReadInputTokens   = 0
+  cacheWriteInputTokens  = 18241
+
+===== CALL 2 (expect cacheReadInputTokens > 0) usage (raw) =====
+{
+  "inputTokens": 16,
+  "outputTokens": 3,
+  "totalTokens": 18260,
+  "cacheReadInputTokens": 18241,
+  "cacheWriteInputTokens": 0
+}
+  inputTokens            = 16
+  outputTokens           = 3
+  cacheReadInputTokens   = 18241
+  cacheWriteInputTokens  = 0
+
+============================================================
+CACHE READ COST ESTIMATE (NOT a billed amount)
+============================================================
+  model id used            : us.anthropic.claude-opus-5-5
+  call 2 cacheReadInputTokens : 18241
+  Anthropic list price     : $0.20 per 1,000,000 cache-read tokens
+  estimated cache-read cost: $0.00364820
+
+  NOTE: This dollar figure is an ESTIMATE derived from the published
+  Anthropic price. Bedrock does not return dollar cost in the API
+  response. To confirm the REAL cache-read unit price, wait ~1 day and
+  use Cost Explorer / CUR filtered by the usagetype containing
+  'cache-read-tokens' for this model. The reconciliation check is:
+      billed_cost / cache_read_tokens * 1e6  ~=  0.20
+
+============================================================
+CACHE HIT CONFIRMED: True (call 2 cacheReadInputTokens = 18241)
+============================================================
+
+----- RESULTS_JSON_BEGIN -----
+{
+  "region": "us-west-2",
+  "model_id_used": "us.anthropic.claude-opus-5-5",
+  "call1_usage": {
+    "inputTokens": 16,
+    "outputTokens": 3,
+    "totalTokens": 18260,
+    "cacheReadInputTokens": 0,
+    "cacheWriteInputTokens": 18241,
+    "cacheDetails": [
+      {
+        "ttl": "5m",
+        "inputTokens": 18241
+      }
+    ]
+  },
+  "call2_usage": {
+    "inputTokens": 16,
+    "outputTokens": 3,
+    "totalTokens": 18260,
+    "cacheReadInputTokens": 18241,
+    "cacheWriteInputTokens": 0
+  },
+  "cache_read_tokens_call2": 18241,
+  "cache_read_price_per_million_usd": 0.2,
+  "estimated_cache_read_cost_usd": 0.0036482000000000003,
+  "cache_hit": true
+}
+----- RESULTS_JSON_END -----
